@@ -1,15 +1,5 @@
 #!/bin/bash
 cd $1
-let TOTAL_SIZE=0
-for f in *
-do
-    cd $f
-    for file in *
-    do
-	temp=$(stat -c%s $file)
-	TOTAL_SIZE=$((TOTAL_SIZE+=$temp))
-    done
-  fi
-done
+let TOTAL_SIZE="$(du $1 | awk '{print $2}')"
 echo "$TOTAL_SIZE"
 exit 0
