@@ -1,5 +1,0 @@
-#!/bin/bash
-cd $1
-let TOTAL_SIZE="$(du $1 | awk '{print $2}')"
-echo "$TOTAL_SIZE"
-exit 0
