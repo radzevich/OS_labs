@@ -4,8 +4,7 @@ exec 6>&2 2>$ERR_LOG
 current=$(pwd)
 if [ -s $ERR_LOG ]
 then
-    exit 0
- 
+    exit 0 
 fi
 find $1 -size -$2c -a -size +$3c -exec du -c {} + | ( tail -n 1; ls | wc -l; du -a -h --total --max-depth=40 $1 ) 
 
