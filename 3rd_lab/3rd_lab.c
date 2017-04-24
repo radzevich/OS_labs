@@ -20,7 +20,8 @@
 #define DIR_SEPARATOR '/'
 #define DEFAULT_DEV_ID -1
 #define INODE_ARRAY_IN_SIZE 1024 * 128
-
+#define BLOCK_SIZE 8
+#define PRD_TABLE_CACHE "prd_cache"
 
 struct inode_set
 {
@@ -31,15 +32,33 @@ struct inode_set
 
 struct p_set
 {
-    int **pipes;
+    int *pipes;
     char *seted;
     int count;
     int size;
     int max_fd;
 };
 
+struct period
+{
+    char val;
+    long len;
+    long count; 
+};
 
+struct period_set
+{
+    struct period prd_table[BLOCK_SIZE / 2];
+    int count;
+};
+
+
+typedef struct period_set prd_set;
 typedef struct p_set pipe_set;
+
+
+//Global table of periods for each byte.
+prd_set prd_array[1 << BLOCK_SIZE];
 
 
 void generateError(char *err_message);
@@ -54,7 +73,7 @@ int thereAreNoFreeProcesses(int cur_pid_num);
 //Checking file descriptors for data from child processes.
 void checkPipes(pipe_set *p_set);
 //Returns created pipe.
-int *getPipe(pipe_set *p_set);
+int getPipe(pipe_set *p_set);
 //Excluding pipe from the pipe set.
 void excludeFromPipeSet(pipe_set *p_set, int index);
 //Allocating memory for pipe set.
@@ -64,6 +83,8 @@ int createInodeArray();
 int addToInodeArray(ino_t inod);
 int inodeInSet(ino_t inod);
 void clearInodeArray();
+void initializePeriodTable(char *path);
+void initializePeriodTable(char *path);
 
 
 int pid_count;
@@ -115,6 +136,7 @@ int main(int argc, char *argv[])
     user_pid_count = atoi(argv[2]);
     p_set = allocatePipeSet(user_pid_count);
     
+    initializePeriodTable(PRD_TABLE_CACHE);
     processAccordingToFileType(argv[1], DEFAULT_DEV_ID, p_set); 
     checkPipes(p_set);  
     
@@ -130,6 +152,7 @@ void processAccordingToFileType(char *path, dev_t dev_id, pipe_set *p_set)
     struct stat entry_info;
     pid_t pid;
     int status;
+    prd_set prd_array[2 << BLOCK_SIZE];
 
     if (lstat(path, &entry_info) != 0)  
         generateError("stat error");
@@ -227,16 +250,14 @@ int processFile(char* path, pipe_set *p_set)
 {  
     pid_t pid;
     int fd[2];
-    int *pnt;
+    int index;
 
     if (thereAreNoFreeProcesses(p_set->count))
     {
         checkPipes(p_set);
     }
 
-    pnt = getPipe(p_set);
-    fd[0] = pnt[0];
-    fd[1] = pnt[1];
+    pipe(fd);
 
     if ((pid = fork()) < 0) {
         generateError("process creating");
@@ -245,7 +266,14 @@ int processFile(char* path, pipe_set *p_set)
         close(fd[0]);
         countPeriods(path, fd[1]);
     }
-    else if (pid > 0) {
+    else if (pid > 0) 
+    {
+        if (fd[0] > p_set->max_fd)
+            p_set->max_fd = fd[0];
+
+        printf("%d\n", p_set->count);
+        sleep(0.5);
+        p_set->pipes[getPipe(p_set)] = fd[0];
         close(fd[1]);
     }
                  
@@ -261,36 +289,37 @@ void checkPipes(pipe_set *p_set)
     size_t total_readen, bytes_to_read;
     ssize_t bytes_readen;
     char buf[256];
-    //do 
-   // {
-        printf("select\n");
+    
+    do 
+    {
+        printf("select %d\n", p_set->count);
         FD_ZERO(&set);
         timeout.tv_sec = 2;
         timeout.tv_usec = 0;
 
-        for (int i = 0; i < pid_count; i++)
+        for (int i = 0; i < user_pid_count; i++)
         {
-            FD_SET(p_set->pipes[i][0], &set);
+            if (p_set->seted[i])
+                FD_SET(p_set->pipes[i], &set);
         }
 
-        //printf("%d  %d\n", p_set->max_fd, ready_fd_num);
-        //ready_fd_num = select(p_set->max_fd, &set, &set, NULL, &timeout);
-    //} while (0 == ready_fd_num);
+        printf("%d  %d\n", p_set->max_fd + 1, ready_fd_num);
+        ready_fd_num = select(p_set->max_fd + 1, &set, NULL, NULL, &timeout);
+    } while (0 == ready_fd_num);
 
     //if (ready_fd_num < 0)
     //    generateError("select failed");
 
     for (int i = 0; i < p_set->size; i++)
     {
-       // if (FD_ISSET(p_set->pipes[i][0], &set))
-        if (p_set->seted[i])
+        if ((p_set->seted[i]) && (FD_ISSET(p_set->pipes[i], &set)))
         {
             //Reading file processing result from the pipe.
             bytes_to_read = 255;
             total_readen = 0;
             while (1)
             {
-                bytes_readen = read(p_set->pipes[i][0], buf, bytes_to_read);
+                bytes_readen = read(p_set->pipes[i], buf, bytes_to_read);
 
                 if ( bytes_readen <= 0 )
                 break;
@@ -302,7 +331,7 @@ void checkPipes(pipe_set *p_set)
 
             printf("%s\n", buf);
 
-            close(p_set->pipes[i][0]);
+            close(p_set->pipes[i]);
             excludeFromPipeSet(p_set, i);
         }
     }
@@ -312,8 +341,7 @@ void checkPipes(pipe_set *p_set)
 void countPeriods(char *path, int fd)
 {
     write(fd, path, strlen(path));
-    printf("%d\n", getpid());
-    //sleep(2);
+    close(fd);
     exit(0);
 }
 
@@ -388,19 +416,14 @@ pipe_set *allocatePipeSet(int num)
     p_set->count = 0;
     p_set->size = num;
     p_set->max_fd = 0;
-    p_set->pipes = (int**)calloc(num, sizeof(int*));
+    p_set->pipes = (int*)calloc(num, sizeof(int));
     p_set->seted = (char*)calloc(num, sizeof(char));
-
-    for (int i = 0; i < num; i++)
-    {
-        p_set->pipes[i] = (int*)calloc(2, sizeof(int));
-    }
 
     return p_set;
 }
 
 //Returns created pipe.
-int *getPipe(pipe_set *p_set)
+int getPipe(pipe_set *p_set)
 {
     int index = 0;
 
@@ -410,20 +433,15 @@ int *getPipe(pipe_set *p_set)
     if (index == p_set->size)
     {
         printf("error: including to pipe");
-        return NULL;
+        return 0;
     }
-
-    pipe(p_set->pipes[index]);
     
     //printf("%d %d\n", p_set->pipes[index][0], p_set->pipes[index][1]);
     p_set->seted[index] = TRUE;
 
-    if (p_set->pipes[index][0] > p_set->max_fd)
-        p_set->max_fd = p_set->pipes[index][0];
-
     p_set->count++;
 
-    return p_set->pipes[index];
+    return index;
 }
 
 //Excluding pipe from the pipe set.
@@ -431,4 +449,130 @@ void excludeFromPipeSet(pipe_set *p_set, int index)
 {
     p_set->seted[index] = FALSE;
     p_set->count--;
+}
+
+
+void setValue(prd_set *p_set, char prd_val, long prd_len)
+{
+    for (int i = 0; i < p_set->count; i++)
+    {
+        if ((p_set->prd_table[i].val == prd_val) && (p_set->prd_table[i].len == prd_len))
+        {
+            p_set->prd_table[i].count++;
+            return;
+        }
+    }
+
+    p_set->prd_table[p_set->count].val = prd_val;
+    p_set->prd_table[p_set->count].len = prd_len;
+    p_set->prd_table[p_set->count].count = 1;
+    p_set->count++;
+}
+
+
+void processValue(prd_set *p_set, char val)
+{
+    char prev_bit_val = -1, cur_bit_val;
+    int prd_len, shift;
+
+    shift = BLOCK_SIZE - 1;
+    prev_bit_val = ((1 << shift) & val) >> shift;
+    shift--;
+    prd_len = 1;
+    
+    while (shift >= 0)
+    {
+        cur_bit_val = ((1 << shift) & val) >> shift;
+
+        if (cur_bit_val == prev_bit_val)
+        {
+            prd_len++;          
+        }   
+        else 
+        {
+            setValue(p_set, prev_bit_val, prd_len);
+            prd_len = 1;
+        }
+
+        if (0 == shift)
+        {
+            setValue(p_set, cur_bit_val, prd_len);
+        }
+
+        prev_bit_val = cur_bit_val;
+        shift--;
+    }
+}
+
+
+void saveToFile(prd_set *p_set, char *path)
+{
+    FILE *file;
+    size_t items_written, total_written;
+
+    file = fopen(path, "w");
+    if (NULL == file)
+    {
+        printf("error: opening file\n");
+        exit(1);
+    }
+
+    //Saving results in file.
+    total_written = 0;
+            
+    while (1)
+    {
+        items_written = fwrite(p_set + total_written, sizeof(prd_set), p_set->count - total_written, file);
+
+        if (items_written <= 0)
+            break;
+
+        total_written += items_written;
+    }
+
+    fclose(file);
+}
+
+
+int readFromFile(prd_set *p_set, char *path)
+{
+    FILE *file;
+    size_t items_readen, total_readen;
+
+    file = fopen(path, "r");
+    if (NULL == file)
+    {
+        return 1;
+    }
+
+    p_set = prd_array;
+    //Saving results in file.
+    total_readen = 0;
+
+    while (1)
+    {
+        items_readen = fread(p_set + total_readen, sizeof(prd_set), p_set->count - total_readen, file);
+
+        for (int i = 0; i < 256; i++)
+            printf("%d\n", p_set[i].count);
+
+        if (items_readen <= 0)
+            break;
+
+        total_readen += items_readen;
+    }
+
+    fclose(file);   
+    return 0;
+}
+
+
+void initializePeriodTable(char *path)
+{
+    memset((char*)prd_array, 0, sizeof(prd_array));
+    
+    for (int i = 0; i < 1 << BLOCK_SIZE; i++)
+    {
+        processValue(&(prd_array[i]), i);
+    }
 }
