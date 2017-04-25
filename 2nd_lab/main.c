@@ -1,8 +1,16 @@
-/*****TODO
-*Проверка устройств							x
-*Обработка символьных и жёстких ссылок		
-*Слеш                                       x
-*/
+//**********************Linux "du" like program********************************************************//
+//Counts the total size of files in directory and all subdirectories.
+//Arguments: 
+//  - path to the directory or file.
+//Return values:
+//  - for each file and directory returns it's read size;
+//  - return total size of entered file or directory, it's block size and the efficiency of memory use.
+//******************************************************************************************************//
+
+//WARNING: my default block size is 512 bits but it can be different for your machine.
+//If you are not lazy you can add getting it from some system file (it is somewhere on /sys).
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -20,12 +28,14 @@
 #define DIR_SEPARATOR '/'
 #define DEFAULT_DEV_ID -1
 #define INODE_ARRAY_IN_SIZE 1024 * 128 
-#define BLOCK_SIZE 512;
+#define BLOCK_SIZE 512
+#define RESULT_LENGTH 9
+
 
 void strRewrite(char *buf, char *str);
 void generateError(char *err_message);
 unsigned long countDirSize(char *dir_path, dev_t dev_id, unsigned long *block_size);
-unsigned long countSize(char *path, dev_t dev_id, unsigned long *block_size);
+unsigned long processAccordingToFileType(char *path, dev_t dev_id, unsigned long *block_size);
 unsigned int getSymbolicLincSize(char *link_path);
 unsigned long getHardDriveSize();
 char *getTime();
@@ -57,16 +67,16 @@ int main(int argc, char *argv[])
     if (createInodeArray() != 0)
     	generateError("inode_set creating");	
 
-    file_size = countSize(/*"/home/virtuain/Desktop"*/argv[1], DEFAULT_DEV_ID, &hard_drive_size);
+    file_size = processAccordingToFileType(argv[1], DEFAULT_DEV_ID, &hard_drive_size);
 
     if (hard_drive_size != 0)
     {
     	part_size = (double)(file_size) / hard_drive_size * 100;
-    	printf("%s %ld\t%ld\t%f%%\n", argv[1], file_size, hard_drive_size, part_size);
+    	printf("%10ld  %10ld  %f%%  total\n", file_size, hard_drive_size, part_size);
     }
     else
     {
-        printf("%s %ld\t%ld\t0%%\n", argv[1], file_size, hard_drive_size);
+        printf("%10ld  %10ld  0%%  total\n", file_size, hard_drive_size);
     }
     
     clearInodeArray();
@@ -76,14 +86,14 @@ int main(int argc, char *argv[])
 }
 
 
-//Counting file size.
-unsigned long countSize(char *path, dev_t dev_id, unsigned long *block_size)
+//Check of file type and proceess it accordingly.
+unsigned long processAccordingToFileType(char *path, dev_t dev_id, unsigned long *block_size)
 {
 	struct stat entry_info;
 	unsigned long int file_size = 0, total_size = 0;
 	dev_t par_dev_id = dev_id;
 
-	if (lstat(path, &entry_info) != 0)  //TODO проверка на жёсткие ссылки
+	if (lstat(path, &entry_info) != 0)  
 		generateError("stat error");
 
 	//If device id of current file and of parent one differs than do not process file. 
@@ -120,18 +130,10 @@ unsigned long countSize(char *path, dev_t dev_id, unsigned long *block_size)
     else if (S_ISDIR(entry_info.st_mode))
     {
       	//Getting directory size.
-       	file_size += countDirSize(path, dev_id, &total_size);
+       	file_size += countDirSize(path, dev_id, &total_size) + (8 * BLOCK_SIZE);
        	*block_size += total_size;
 
-
-       	if (file_size == 0)
-       	{  	
-       		file_size += entry_info.st_size;
-       	
-       	}
-       	
-       	if ((file_size != entry_info.st_size) & (par_dev_id != DEFAULT_DEV_ID))
-       		printf("%s\t%ld\t%ld\n", path, file_size, total_size);	     		
+       	printf("%10ld  %10ld  %s\n", file_size, total_size, path);	     		
     }
  	
  	return file_size;	
@@ -180,7 +182,7 @@ unsigned long countDirSize(char *dir_path, dev_t dev_id, unsigned long *block_si
     	}
 
         //Recursive counting of subdirectories and files.
-        file_size += countSize(pathName, dev_id, block_size);
+        file_size += processAccordingToFileType(pathName, dev_id, block_size);
         retval = readdir_r(dir, &entry, &entry_ptr);
         if (retval != 0)
     		generateError("reading directory");
@@ -201,9 +203,7 @@ unsigned int getSymbolicLincSize(char *link_path)
 	int retval = 0, len = 0;
 
 	dir = opendir(link_path);
-	/*if (NULL == dir)
-        generateError("reading link");
-*/
+
     //Directory files processing.
     retval = readdir_r(dir, &entry, &entry_ptr);
     len = strlen(entry.d_name);
@@ -239,6 +239,8 @@ void generateError(char *err_message)
 }
 
 
+
+//**************************INODE ARRAY FOR HARD LINKS KEEPING**********************************//
 int createInodeArray()
 {
 	inode_set.array = (ino_t *)calloc(INODE_ARRAY_IN_SIZE, sizeof(ino_t));
