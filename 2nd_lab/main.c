@@ -3,12 +3,12 @@
 //Arguments: 
 //  - path to the directory or file.
 //Return values:
-//  - for each file and directory returns it's read size;
+//  - for each file and directory returns it's real size;
 //  - return total size of entered file or directory, it's block size and the efficiency of memory use.
 //******************************************************************************************************//
 
 //WARNING: my default block size is 512 bits but it can be different for your machine.
-//If you are not lazy you can add getting it from some system file (it is somewhere on /sys).
+//If you are not lazy you can add function geted it from any system file (it is somewhere on /sys).
 
 
 #include <stdio.h>
