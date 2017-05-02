@@ -44,11 +44,11 @@ prd_set prd_array[1 << BLOCK_SIZE];
 int main(int argc, char *argv[])
 {
 
-    /*if (argc < 2)
+    if (argc < 2)
     {
         printf("error: to few arguments\n");
         exit(1);
-    }*/
+    }
 
     memset((char*)prd_array, 0, sizeof(prd_array));
 
@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
         printf("mainCount %d\n\n", prd_array[i].count);
     }
 */
-    countPeriods("file.txt");
+    countPeriods(argv[1]);
 
     return 0;
 }
@@ -103,7 +103,7 @@ void processValue(prd_set *p_set, char val)
 
         if (0 == shift)
         {
-            setEndPointValue(p_set, prev_bit_val, prd_len);
+            setEndPointValue(p_set, cur_bit_val, prd_len);
         }
 
         prev_bit_val = cur_bit_val;
@@ -173,7 +173,6 @@ void readFromFile(char *buf, size_t bytes_to_read, FILE *file)
 {
     size_t bytes_readen, total_readen;
 
-    //Saving results in file.
     total_readen = 0;
 
     while (1)
@@ -225,8 +224,12 @@ void countPeriods(char *path)
     p_list->prd_table = (struct period *)calloc(BLOCK_SIZE, sizeof(struct period));
 
     readFromFile(buf, file_size, file);
-
     processData(p_list, buf, file_size);
+
+    for (int i = 0; i < p_list->count; i++)
+    {
+    	printf("val: %d  len: %ld  count: %ld\n", p_list->prd_table[i].val, p_list->prd_table[i].len, p_list->prd_table[i].count);
+    }
 
     fclose(file);
 }
@@ -234,9 +237,7 @@ void countPeriods(char *path)
 
 void addToPeriodList(prd_list *p_list, struct period *prd)
 {
-    printf("size: %d  count: %d\n", p_list->size, p_list->count);
-
-    for (int i = 0; i < p_list->count; i++)
+     for (int i = 0; i < p_list->count; i++)
     {
         if ((p_list->prd_table[i].val == prd->val) && (p_list->prd_table[i].len == prd->len))
         {
@@ -261,7 +262,6 @@ void addToPeriodList(prd_list *p_list, struct period *prd)
     p_list->prd_table[p_list->count].len = prd->len;
     p_list->prd_table[p_list->count].count = prd->count;
     p_list->count++;
-    printf("added\n");
 }
 
 
@@ -272,14 +272,10 @@ long checkNext(char *data, char val, long data_size)
 
     while (index < data_size)
     {
-        prd = &prd_array[(int)data[index]];
+        prd = &prd_array[(unsigned char)data[index]];
 
-        if (prd->prd_table[0].val == val)
-        {
+        if ((prd->prd_table[0].val == val) && (prd->count == 1)) {
             index++;
-
-            if (prd->prd_table[0].len != BLOCK_SIZE)
-                break;
         }
         else
             break;
@@ -291,46 +287,49 @@ long checkNext(char *data, char val, long data_size)
 
 void processData(prd_list *p_list, char *data, long data_size)
 {
-    long index = 0, repeats = 0, count;
+    long index = 0, repeats = 0, prev_processed = 0, i;
     long prev_len = 0;
     char val;
     struct period prd;
 
+
     while (index < data_size)
     {
-        if (prd_array[(int)data[index]].count == 1)
-        {
-            val = prd_array[(int)data[index]].prd_table[0].val;
-            repeats = checkNext(data + 1, val, data_size - index);
-            index += repeats;
+        val = prd_array[(unsigned char)data[index]].prd_table[0].val;
+        repeats = checkNext(&data[(unsigned char)index], val, data_size - index - 1);
+        prev_processed = 0;
+        index += repeats;
+        prd.val = val;
+        prd.len = prev_len + (repeats) * BLOCK_SIZE;
+        prd.count = 1;
 
-            if (prd_array[(int)data[index]].count > 1)
-            {
-                prev_len += (repeats) * BLOCK_SIZE;
-            }
-            else
-            {
-                prd.len = prev_len + (repeats + 1) * BLOCK_SIZE;
-                prd.val = prd_array[(int)data[index]].prd_table[0].val;
+        if (val == prd_array[(unsigned char)data[index]].prd_table[0].val) {
+            prd.len += prd_array[(unsigned char)data[index]].prd_table[0].len;
+            prev_processed = 1; 
+        }
+
+        addToPeriodList(p_list, &prd);       
+
+        for (i = prev_processed; i < prd_array[(unsigned char)data[index]].count - 1; i++)
+        {
+            addToPeriodList(p_list, &prd_array[(unsigned char)data[index]].prd_table[i]);
+            printf("third val: %ld\n", prd.len);
+        }
+
+        prev_len = 0;
+
+        if (prd_array[(unsigned char)data[index]].count > 1)
+        {
+            if ((index < data_size - 1) && 
+                (prd_array[(unsigned char)data[index]].prd_table[i].val == prd_array[(unsigned char)data[index + 1]].prd_table[0].val)) {
+                prev_len = prd_array[(unsigned char)data[index]].prd_table[i].len;
+            } else { 
+                prd.len = prd_array[(unsigned char)data[index]].prd_table[i].len;
+                prd.val = prd_array[(unsigned char)data[index]].prd_table[i].val;
                 prd.count = 1;
                 addToPeriodList(p_list, &prd);
-                prev_len = 0;
-                index++;
-                continue;
             }
         }
-
-        prd.len = prev_len + prd_array[(int)data[index]].prd_table[0].len;
-        prd.val = prd_array[(int)data[index]].prd_table[0].val;
-        prd.count = 1;
-        addToPeriodList(p_list, &prd);
-
-        for (int i = 1; i < prd_array[(int)data[index]].count - 1; i++)
-        {
-            addToPeriodList(p_list, &prd_array[(int)data[index]].prd_table[i]);
-        }
-
-        count = prd_array[(int)data[index]].count;
-        prev_len = prd_array[(int)data[index]].prd_table[count - 1].len;
+        index++;
     }
 }
