@@ -1,5 +1,3 @@
-//Кол-во процессов > 1.
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -9,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/shm.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <signal.h>
@@ -29,15 +28,6 @@ struct inode_set
     unsigned int size;
     ino_t *array;
 } inode_set;
-
-struct p_set
-{
-    int *pipes;
-    char *seted;
-    int count;
-    int size;
-    int max_fd;
-};
 
 struct period
 {
@@ -62,89 +52,54 @@ struct period_list
 
 typedef struct period_set prd_set;
 typedef struct period_list prd_list;
-typedef struct p_set pipe_set;
 
 
 //Global table of periods for each byte.
 prd_set prd_array[1 << BLOCK_SIZE];
+//ID for sharing memory.
 int shmid = 0;
+//The maximal number of child processes can be created.
+int user_proc_num = 0;
+//The current number of working child processes.
+int proc_counter = 0;
 
 
 void generateError(char *err_message);
 //Viewing directry files.
-unsigned long scanDirectory(char *dir_path, dev_t dev_id, pipe_set *p_set);
+unsigned long scanDirectory(char *dir_path, dev_t dev_id);
 //Checking is file a directory or is a regular one.
-void processAccordingToFileType(char *path, dev_t dev_id, pipe_set *p_set);
+void processAccordingToFileType(char *path, dev_t dev_id);
 //Checking file type and file processing.
-int processFile(char* path, pipe_set *p_set);
-//Check if the number of launched processes is less than the number of processes entered by user.
-int thereAreNoFreeProcesses(int cur_pid_num);
-//Checking file descriptors for data from child processes.
-void checkPipes(pipe_set *p_set);
-//Returns created pipe.
-int getPipe(pipe_set *p_set);
-//Excluding pipe from the pipe set.
-void excludeFromPipeSet(pipe_set *p_set, int index);
-//Allocating memory for pipe set.
-pipe_set *allocatePipeSet(int num);
+int processFile(char* path);
+//Functions used to work with inode array.
+int thereAreNoFreeProcesses();
 int createInodeArray();
 int addToInodeArray(ino_t inod);
 int inodeInSet(ino_t inod);
 void clearInodeArray();
+//Functions used to count periods.
 void initializePeriodTable(char *path);
-long getFileSize(FILE *file);
+//Adding new group to period list.
 void addToPeriodList(prd_list *p_list, struct period *prd);
+//Group bits and add it to period set.
 void processValue(prd_set *p_set, unsigned char val);
+//Add groups of pits to period set.
 void setValue(prd_set *p_set, unsigned char prd_val, long prd_len);
 void saveToFile(prd_set *p_set, char *path);
+long getFileSize(FILE *file);
 void readFromFile(unsigned char *buf, size_t bytes_to_read, FILE *file);
-void countPeriods(char *path, int fd);
+//Main algorithm function. Open file, read it in buf, call processing data functions.
+void countPeriods(char *path);
+//Add the first or the last group of bits to period set.
 void setEndPointValue(prd_set *p_set, unsigned char prd_val, long prd_len);
+//Adding new group to period list.
 void addToPeriodList(prd_list *p_list, struct period *prd);
+//Processing groups of bits and adding it to result table.
 void processData(prd_list *p_list, unsigned char *data, long data_size);
 
-prd_set prd_array[1 << BLOCK_SIZE];
-
-
-int pid_count;
-int user_pid_count = 0;
-
-
-void sigchld_handler (int signum)
-{
-    pid_t p;
-    int status;
-
-    /* loop as long as there are children to process */
-    while (1) {
-
-       /* retrieve child process ID (if any) */
-       p = waitpid(-1, &status, WNOHANG);
-
-       /* check for conditions causing the loop to terminate */
-       if (p == -1) {
-           /* continue on interruption (EINTR) */
-           if (errno == EINTR) {
-               continue;
-           }
-           /* break on anything else (EINVAL or ECHILD according to manpage) */
-           break;
-       }
-       else if (p == 0) {
-           /* no more children to process, so break */
-           break;
-       }
-
-    }
-}
 
 int main(int argc, char *argv[])
 {
-    struct sigaction action;
-    pipe_set *p_set;
-
-    action.sa_handler = sigchld_handler;
-    sigaction(SIGCHLD, &action, 0);
     //Checking command line arguments num.
     if (argc < 3)
         generateError("too few arguments");
@@ -154,26 +109,34 @@ int main(int argc, char *argv[])
 
     shmid = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);	
 
-    user_pid_count = atoi(argv[2]);
-    //p_set = allocatePipeSet(user_pid_count);
+    user_proc_num = atoi(argv[2]);
+    if (user_proc_num <= 0)
+    {
+        printf("There are no available processes\n");
+        return 0;
+    }
 
     initializePeriodTable(PRD_TABLE_CACHE);
-    //processAccordingToFileType(argv[1], DEFAULT_DEV_ID, p_set); 
-    //checkPipes(p_set);  
+    processAccordingToFileType(argv[1], DEFAULT_DEV_ID); 
     
     clearInodeArray();
+    
+    while (proc_counter > 0)
+    {
+        wait(NULL);
+        proc_counter--;
+    }
 	
 	return 0;
 }
 
 //Checking is file a directory or is a regular one.
-void processAccordingToFileType(char *path, dev_t dev_id, pipe_set *p_set)
+void processAccordingToFileType(char *path, dev_t dev_id)
 {
 
     struct stat entry_info;
     pid_t pid;
     int status;
-    prd_set prd_array[2 << BLOCK_SIZE];
 
     if (lstat(path, &entry_info) != 0)  
         generateError("stat error");
@@ -198,18 +161,18 @@ void processAccordingToFileType(char *path, dev_t dev_id, pipe_set *p_set)
     //Checking if file is regular.
     if (S_ISREG(entry_info.st_mode))
     {
-        processFile(path, p_set);
+        processFile(path);
     }
     //Checking if file is a directory. 
     else if (S_ISDIR(entry_info.st_mode))
     {
-        scanDirectory(path, dev_id, p_set);            
+        scanDirectory(path, dev_id);            
     }
     
 }
 
 //Viewing directry files.
-unsigned long scanDirectory(char *dir_path, dev_t dev_id, pipe_set *p_set)
+unsigned long scanDirectory(char *dir_path, dev_t dev_id)
 {
 	DIR *dir;
 	struct dirent entry;
@@ -253,7 +216,7 @@ unsigned long scanDirectory(char *dir_path, dev_t dev_id, pipe_set *p_set)
     	}
 
         //Recursive directory walking.
-        processAccordingToFileType(pathName, dev_id, p_set);
+        processAccordingToFileType(pathName, dev_id);
         retval = readdir_r(dir, &entry, &entry_ptr);
         if (retval != 0)
     		generateError("reading directory");
@@ -267,105 +230,37 @@ unsigned long scanDirectory(char *dir_path, dev_t dev_id, pipe_set *p_set)
 
 
 //Checking file type and file processing.
-int processFile(char* path, pipe_set *p_set)
+int processFile(char* path)
 {  
     pid_t pid;
-    int fd[2];
-    int index;
+    int sig;
 
-    if (thereAreNoFreeProcesses(p_set->count))
+    if (thereAreNoFreeProcesses())
     {
-        printf("No free processes\n");
-        checkPipes(p_set);
+        wait(NULL);
+        proc_counter--;
     }
-
-    pipe(fd);
 
     if ((pid = fork()) < 0) {
         generateError("process creating");
     }   
     else if (pid == 0) {
-        close(fd[0]);
-
-        countPeriods(path, fd[1]);
+        countPeriods(path);
     }
     else if (pid > 0) 
     {
-        if (fd[0] > p_set->max_fd)
-            p_set->max_fd = fd[0];
-
-        //printf("%d\n", p_set->count);
-        //sleep(0.5);
-        p_set->pipes[getPipe(p_set)] = fd[0];
-        close(fd[1]);
+        proc_counter++;
     }
                  
     return 0;
 }
 
-//Checking file descriptors for data from child processes.
-void checkPipes(pipe_set *p_set)
-{
-    fd_set set;
-    int ready_fd_num;
-    struct timeval timeout;
-    size_t total_readen, bytes_to_read;
-    ssize_t bytes_readen;
-    char buf[256];
-    
-    do 
-    {
-        printf("select %d\n", p_set->count);
-        FD_ZERO(&set);
-        timeout.tv_sec = 2;
-        timeout.tv_usec = 0;
-
-        for (int i = 0; i < user_pid_count; i++)
-        {
-            if (p_set->seted[i])
-                FD_SET(p_set->pipes[i], &set);
-        }
-
-        printf("%d  %d\n", p_set->max_fd + 1, ready_fd_num);
-        ready_fd_num = select(p_set->max_fd + 1, &set, NULL, NULL, &timeout);
-    } while (0 == ready_fd_num);
-
-    //if (ready_fd_num < 0)
-    //    generateError("select failed");
-
-    for (int i = 0; i < p_set->size; i++)
-    {
-        if ((p_set->seted[i]) && (FD_ISSET(p_set->pipes[i], &set)))
-        {
-            //Reading file processing result from the pipe.
-            bytes_to_read = 255;
-            total_readen = 0;
-            while (1)
-            {
-                bytes_readen = read(p_set->pipes[i], buf, bytes_to_read);
-
-                if ( bytes_readen <= 0 )
-                break;
-
-                total_readen += bytes_readen;
-            }
-
-            buf[total_readen] = '\0';
-
-            //printf("%s\n\n", buf);
-
-            close(p_set->pipes[i]);
-            excludeFromPipeSet(p_set, i);
-        }
-    }
-}
-
 
 //Check if the number of launched processes is less 
 //than the number of processes entered by user.
-int thereAreNoFreeProcesses(int cur_pid_num)
+int thereAreNoFreeProcesses()
 {
-    return (cur_pid_num > user_pid_count - 1);
+    return (proc_counter >= user_proc_num);
 }
 
 //Generating error with error message.
@@ -423,50 +318,6 @@ int inodeInSet(ino_t inod)
 }
 
 
-//Allocating memory for pipe set.
-pipe_set *allocatePipeSet(int num)
-{
-    pipe_set *p_set = (pipe_set*)calloc(1, sizeof(pipe_set));
-
-    p_set->count = 0;
-    p_set->size = num;
-    p_set->max_fd = 0;
-    p_set->pipes = (int*)calloc(num, sizeof(int));
-    p_set->seted = (char*)calloc(num, sizeof(char));
-
-    return p_set;
-}
-
-//Returns created pipe.
-int getPipe(pipe_set *p_set)
-{
-    int index = 0;
-
-    while ((p_set->seted[index]) && (index < p_set->size))
-        index++;
-
-    if (index == p_set->size)
-    {
-        printf("error: including to pipe");
-        return 0;
-    }
-    
-    //printf("%d %d\n", p_set->pipes[index][0], p_set->pipes[index][1]);
-    p_set->seted[index] = TRUE;
-
-    p_set->count++;
-
-    return index;
-}
-
-//Excluding pipe from the pipe set.
-void excludeFromPipeSet(pipe_set *p_set, int index)
-{
-    p_set->seted[index] = FALSE;
-    p_set->count--;
-}
-
-
 void initializePeriodTable(char *path)
 {
     memset((char*)prd_array, 0, sizeof(prd_array));
@@ -479,7 +330,7 @@ void initializePeriodTable(char *path)
 
 
 //************************************************Algorithm****************************************************************
-
+//Group bits and add it to period set.
 void processValue(prd_set *p_set, unsigned char val)
 {
     char prev_bit_val = -1, cur_bit_val;
@@ -518,7 +369,7 @@ void processValue(prd_set *p_set, unsigned char val)
     }
 }
 
-
+//Add the first or the last group of bits to period set.
 void setEndPointValue(prd_set *p_set, unsigned char prd_val, long prd_len)
 {
     p_set->prd_table[p_set->count].val = prd_val;
@@ -528,7 +379,7 @@ void setEndPointValue(prd_set *p_set, unsigned char prd_val, long prd_len)
 
 }
 
-
+//Add groups of pits to period set.
 void setValue(prd_set *p_set, unsigned char prd_val, long prd_len)
 {
     for (int i = 1; i < p_set->count; i++)
@@ -593,7 +444,7 @@ void readFromFile(unsigned char *buf, size_t bytes_to_read, FILE *file)
     }
 }
 
-
+//Return the size of file.
 long getFileSize(FILE *file)
 {
     long cur_pos, start_pos, end_pos;
@@ -608,13 +459,49 @@ long getFileSize(FILE *file)
     return end_pos - start_pos;
 }
 
+//Check if terminal is not used by another process, block it and print results.
+void returnResult(char *path, prd_list *p_list)
+{
+    int *block_id;
+    int pid;
+    
+    if (NULL == (block_id = (int *)shmat(shmid, NULL, 0))) {       
+        printf("error: sharing memory\n");     
+        exit(1);     
+    }
 
-void countPeriods(char *path, int fd)
+    pid = getpid();
+
+    while (1)
+    {
+        if (*block_id == 0)
+        {
+            *block_id = pid;
+            if (*block_id == pid)
+            {
+                printf("%s\n", path);
+                for (int i = 0; i < p_list->count; i++)
+                {
+                    printf("val: %u  len: %ld  count: %ld\n", (unsigned char)p_list->prd_table[i].val, 
+                                                                             p_list->prd_table[i].len, 
+                                                                             p_list->prd_table[i].count);
+                }
+                printf("\n");
+                *block_id = 0;
+                break;    
+            }
+        }
+        usleep(pid);
+    }
+}
+
+//Main algorithm function. Open file, read it in buf, call processing data functions.
+void countPeriods(char *path)
 {
     FILE *file;
     long file_size;
     unsigned char *buf;
-    prd_list *p_list;
+    prd_list *p_list;  
 
     file = fopen(path, "r");
     if (NULL == file)
@@ -632,17 +519,14 @@ void countPeriods(char *path, int fd)
 
     readFromFile(buf, file_size, file);
     processData(p_list, buf, file_size);
-
-    for (int i = 0; i < p_list->count; i++)
-    {
-        //write()
-    }
+    returnResult(path, p_list);
 
     fclose(file);
     free(p_list);
+    exit(0);
 }
 
-
+//Adding new group to period list.
 void addToPeriodList(prd_list *p_list, struct period *prd)
 {
     for (int i = 0; i < p_list->count; i++)
@@ -670,7 +554,7 @@ void addToPeriodList(prd_list *p_list, struct period *prd)
     p_list->count++;
 }
 
-
+//Next group of bits preview
 long checkNext(unsigned char *data, unsigned char val, long data_size)
 {
     long index = 0;
@@ -689,7 +573,7 @@ long checkNext(unsigned char *data, unsigned char val, long data_size)
     return index;
 }
 
-
+//Processing groups of bits and adding it to result table.
 void processData(prd_list *p_list, unsigned char *data, long data_size)
 {
     long index = 0, repeats = 0, prev_processed = 0, i;
