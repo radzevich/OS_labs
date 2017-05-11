@@ -18,6 +18,8 @@
 #define S0 0
 #define S1 1
 #define S2 2
+//Значение, до которого будет увеличиваться счётчик сигналов.
+#define MAX_SIGNAL_COUNT 101
 
 
 int proc_id = 0;
@@ -25,7 +27,7 @@ const char *process_name;
 int child_pids[CHILD_NUM];
 int process_tree_initialized = 0;
 long timer;
-int main_counter = 0;
+int counter = 0;
 
 
 char signal_scheme[CHILD_NUM + 1][CHILD_NUM + 1] = {
@@ -73,17 +75,16 @@ void sighandler(int signum, siginfo_t *info, void *context)
     sigaddset(&mask, SIGUSR2);
     sigprocmask(SIG_BLOCK, &mask, NULL);
 
+    counter++;
+
 	sender_pid = info->si_pid;
 	//Если пришёл сигнал в первый процесс, то наращиваем счётчик.
 	if (proc_id == 1)
 	{
-		main_counter++;
-		if (101 <= main_counter)
+		if (MAX_SIGNAL_COUNT <= counter)
 		{
 			kill(getppid(), SIGTERM);
-			//termination_handler(SIGTERM);
-			sleep(3);
-			exit(0);
+			//exit(0);
 		}
 	}
 
@@ -144,7 +145,7 @@ void termination_handler(int signum)
     }
 
     kill(getppid(), SIGCHLD);
-    printf("Proc %d terminated\n", proc_id);
+    printf("%d %d\n", proc_id, counter);
     exit(0);
 }
 
